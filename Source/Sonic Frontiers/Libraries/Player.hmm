@@ -7,7 +7,6 @@ Library "Player" by "Hyper, NM, Ahremic, Skyth & Sajid"
     #lib "Collections"
     #lib "GameManager"
     #lib "GameObject"
-    #lib "Lua"
     #lib "MessageManager"
     #lib "Reflection"
     #lib "StringMapOperation"
@@ -26,7 +25,10 @@ Library "Player" by "Hyper, NM, Ahremic, Skyth & Sajid"
     #lib "TailsParameters"
 
     #import "GOComponents"
+    #import "Messages"
+    #import "Objects"
     #import "Plugins"
+    #import "Postures"
     #import "Services"
     #import "States"
 
@@ -80,6 +82,11 @@ Library "Player" by "Hyper, NM, Ahremic, Skyth & Sajid"
         [FieldOffset(0x38)] public GOCPlayerHsm* pGOCPlayerHsm;
 
         /// <summary>
+        /// A pointer to an instance of `app::player::GOCPlayerPosture`.
+        /// </summary>
+        [FieldOffset(0x40)] public GOCPlayerPosture* pGOCPlayerPosture;
+
+        /// <summary>
         /// A pointer to an instance of `app::player::PlayerHsmContext::OutOfControlTimerList`.
         /// </summary>
         [FieldOffset(0x78)] public long pOutOfControlTimerList;
@@ -95,20 +102,6 @@ Library "Player" by "Hyper, NM, Ahremic, Skyth & Sajid"
     {
         if (_isInitialised)
             return;
-        
-        // Allow character switching outside of Another Story.
-        Lua.CreateLineHook
-        (
-            @"""sonic"", ""tails"", ""knuckles"", ""amy"", ",
-
-            "script/resident/stagedata.lua",
-
-            @"attrs\s*=\s*\{",
-
-            HookBehavior.After,
-
-            true
-        );
 
         // Always construct app::player::AmyInfo.
         WriteNop
@@ -182,6 +175,26 @@ Library "Player" by "Hyper, NM, Ahremic, Skyth & Sajid"
         _isInitialised = true;
     }
 
+    [LibraryUpdate]
+    public void Update()
+    {
+        var pLevelInfo = GameManager.GetService<LevelInfo>();
+
+        if (pLevelInfo == null)
+            return;
+
+        var pStageData = pLevelInfo->pStageData;
+
+        if (pStageData == null)
+            return;
+        
+        // Update current stage attributes to include other characters.
+        pStageData->AttributeFlags |= (1 << (int)StageInfo.Attributes.Sonic);
+        pStageData->AttributeFlags |= (1 << (int)StageInfo.Attributes.Amy);
+        pStageData->AttributeFlags |= (1 << (int)StageInfo.Attributes.Knuckles);
+        pStageData->AttributeFlags |= (1 << (int)StageInfo.Attributes.Tails);
+    }
+
     public PlayerType GetPlayerType()
     {
         var pLevelInfo = GameManager.GetService<LevelInfo>();
@@ -217,10 +230,10 @@ Library "Player" by "Hyper, NM, Ahremic, Skyth & Sajid"
         if (in_playerType == PlayerType.Unknown)
             return;
 
-        Lua.Call("ChangePlayerCharacter", in_playerType.ToString());
+        Messages.SendMessageToGameManager(new MsgChangePlayerCharacter(in_playerType));
     }
 
-    public enum PlayerType
+    public enum PlayerType : sbyte
     {
         Unknown = -1,
         Sonic,
@@ -234,7 +247,7 @@ Library "Player" by "Hyper, NM, Ahremic, Skyth & Sajid"
     public static class Animation
     {
         /* 0x1408122E0 */
-        private static long _sigSetAnimation = ScanSignature("\x40\x53\x48\x83\xEC\x20\xF6\x81\x78\x01\x00\x00\x10\x48\x8B\xDA", "xxxxxxxxxxxxxxxx");
+        private static long _sigSetAnimation = Memory.ReadCall(ScanSignature("\xE8\xCC\xCC\xCC\xCC\x80\xBD\xB0\x00\x00\x00\x00\x48\x8B\x9C\x24\xB8\x00\x00\x00", "x????xxxxxxxxxxxxxxx"));
         FUNCTION_PTR(void, fpSetAnimation, _sigSetAnimation, GOCPlayerVisual* in_pGOCPlayerVisual, long in_pAnimationName, byte in_unk1)
 
         /* 0x140813140 */
@@ -590,6 +603,33 @@ Library "Player" by "Hyper, NM, Ahremic, Skyth & Sajid"
 
     /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+    public static class Posture
+    {
+        public static PlayerPosture* GetPosture(string in_postureName)
+        {
+            var pPlayerContext = GetPlayerContext();
+
+            if (pPlayerContext == null)
+                return null;
+
+            var pGOCPlayerPosture = pPlayerContext->pGOCPlayerPosture;
+
+            if (pGOCPlayerPosture == null)
+                return null;
+
+            var pPostureMoveManager = pGOCPlayerPosture->pPostureMoveManager;
+
+            if (pPostureMoveManager == null)
+                return null;
+
+            return pPostureMoveManager->GetPlayerPosture(in_postureName);
+        }
+
+        MAKE_STATIC_GENERIC_API(GetPosture)
+    }
+
+    /////////////////////////////////////////////////////////////////////////////////////////////////////////
+
     public static class Sound
     {
         /* 0x140AE69F0 */
@@ -799,7 +839,9 @@ Library "Player" by "Hyper, NM, Ahremic, Skyth & Sajid"
                     break;
             }
 
-            if (name != typeof(T).Name)
+            var nameAttr = Helpers.GetInternalName(typeof(T));
+
+            if (name != (string.IsNullOrEmpty(nameAttr) ? typeof(T).Name : nameAttr))
                 return null;
             
             return (T*)pGOCPlayerHsm->Hsm.Base.pState;
@@ -973,7 +1015,69 @@ Library "Player" by "Hyper, NM, Ahremic, Skyth & Sajid"
             return IsGrounded() ||
                 IS_STATE_FLAG(IsGrind) ||
                 IS_STATE_FLAG(IsSpringJump) ||
-                IS_STATE_FLAG(IsWallClimb);
+                IS_STATE_FLAG(IsWallClimb) ||
+                IS_STATE_FLAG(IsWallClimbIdle);
+        }
+
+        public static bool IsLockOnCursorVisible()
+        {
+            var pUICursor = GameManager.GetGameObject<UICursor>();
+
+            if (pUICursor == null)
+                return false;
+                
+            var pGOCTinyFsm = GameObject.GetGOC<GOCTinyFsm>(&pUICursor->Base);
+
+            if (pGOCTinyFsm == null)
+                return false;
+
+            var pUILockonContext = pGOCTinyFsm->GetContext<UILockonContext>();
+
+            if (pUILockonContext == null)
+                return false;
+                
+            return pUILockonContext->pGOCCollider != null;
+        }
+
+        public static GameObject.Data* GetLockOnTarget()
+        {
+            var pUICursor = GameManager.GetGameObject<UICursor>();
+
+            if (pUICursor == null)
+                return null;
+                
+            var pGOCTinyFsm = GameObject.GetGOC<GOCTinyFsm>(&pUICursor->Base);
+
+            if (pGOCTinyFsm == null)
+                return null;
+
+            var pUILockonContext = pGOCTinyFsm->GetContext<UILockonContext>();
+
+            if (pUILockonContext == null)
+                return null;
+                
+            var pGOCCollider = pUILockonContext->pGOCCollider;
+
+            if (pGOCCollider == null)
+                return null;
+                
+            return pGOCCollider->pGameObject;
+        }
+
+        public static bool IsSpecialAction()
+        {
+            return IS_STATE_FLAG(IsGrind) ||
+                IS_STATE_FLAG(IsDiving) || 
+                IS_STATE_FLAG(IsDivingBoost) || 
+                IS_STATE_FLAG(IsDrift) || 
+                IS_STATE_FLAG(IsWallClimb) ||
+                IS_STATE_FLAG(IsWallClimbIdle) ||
+                IS_STATE_FLAG(IsBoarding) ||
+                IS_STATE_FLAG(IsSpringJump) ||
+                IS_WORLD_FLAG(IsDead) ||
+                IS_WORLD_FLAG(IsOutOfControl) ||
+                IS_WORLD_FLAG(IsAutoRun) ||
+                IS_WORLD_FLAG(IsNitroBoost);
         }
 
         public static bool IsDropDashCharge()
