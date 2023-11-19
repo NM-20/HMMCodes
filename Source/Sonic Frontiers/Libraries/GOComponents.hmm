@@ -8,7 +8,6 @@ Library "GOComponents" by "Hyper"
     #lib "Memory"
     #lib "Player"
     #lib "PlayerEffect"
-    #lib "PlayerVisual"
     #lib "StringMapOperation"
 
     #import "Cameras"
